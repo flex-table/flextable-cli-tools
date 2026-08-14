@@ -307,7 +307,10 @@ jobs:
             Write-Host "::endgroup::"; exit 0
           }
           Write-Host "mysqldump.exe: $((Get-Item $dump).Length) bytes"
+          Write-Host "== src bin listing =="; Get-ChildItem $bin -File | ForEach-Object { Write-Host ("   {0}  {1}" -f $_.Name, $_.Length) } | Select-Object -First 8
           ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -Tools 'mysqldump mysql' -OutDir dist
+          Write-Host "== stage listing (dist\mysql-$major-windows-x86_64) =="
+          Get-ChildItem -Recurse "dist\mysql-$major-windows-x86_64" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("   {0}  {1}" -f $_.Name, $_.Length) }
           Write-Host "::endgroup::"
           # bundle_windows.ps1 completed (it did not throw); neutralize any non-zero
           # $LASTEXITCODE leaked by dumpbin during the PE-import walk so the step passes.

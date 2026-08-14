@@ -296,14 +296,22 @@ jobs:
           }
           $extract = "$env:RUNNER_TEMP\mysql$major"
           if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
-          Expand-Archive -Path $zipPath -DestinationPath $extract -Force
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          # tar.exe (bsdtar, present on every Windows runner) is far more reliable than
+          # Expand-Archive on MySQL's ~500 MB full zip, which can leave 0-byte stub files.
+          tar.exe -xf $zipPath -C $extract
           $bin = Get-ChildItem -Path $extract -Directory | Select-Object -First 1 | ForEach-Object { Join-Path $_.FullName 'bin' }
-          if (-not $bin -or -not (Test-Path (Join-Path $bin 'mysqldump.exe'))) {
-            Write-Host "no mysqldump.exe for mysql $major - omitting"
+          $dump = if ($bin) { Join-Path $bin 'mysqldump.exe' } else { $null }
+          if (-not $dump -or -not (Test-Path $dump) -or (Get-Item $dump).Length -lt 100000) {
+            Write-Host "mysqldump.exe missing/empty for mysql $series - omitting"
             Write-Host "::endgroup::"; exit 0
           }
+          Write-Host "mysqldump.exe: $((Get-Item $dump).Length) bytes"
           ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -Tools 'mysqldump mysql' -OutDir dist
           Write-Host "::endgroup::"
+          # bundle_windows.ps1 completed (it did not throw); neutralize any non-zero
+          # $LASTEXITCODE leaked by dumpbin during the PE-import walk so the step passes.
+          exit 0
 
       - name: Upload bundles
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

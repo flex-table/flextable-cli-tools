@@ -1,0 +1,5 @@
+dist/
+*.zip
+sign-manifest/
+__pycache__/
+.DS_Store

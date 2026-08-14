@@ -1,0 +1,301 @@
+# Build the version-matched CLI-tools bundles (pg_dump/mysqldump/... + their
+# dylib/DLL closure) the FlexTable app downloads at runtime, as per-platform,
+# per-major zips. This repo is PUBLIC and holds NO secrets: it only builds the
+# binaries and uploads them as workflow artifacts. Signing (ed25519) + the S3
+# publish live in the private app repo's `cli-tools-publish.yml`, which pulls
+# these artifacts, merges the manifest, and uploads. Making this repo public
+# gives free unlimited GitHub-hosted macOS/Windows/Linux runners (private repos
+# bill macOS at 10x against a 2000-min quota) while the crown-jewel signing seed
+# never touches a public repo.
+#
+#   setup           - emit the platform build matrix.
+#   build (matrix)  - per platform: obtain the client binaries for each requested
+#                     major, run the matching bundle script, upload dist/*.zip.
+#                     A cell with no binaries for a major is OMITTED (continue),
+#                     not a hard matrix failure.
+name: Build CLI tools
+
+on:
+  workflow_dispatch:
+    inputs:
+      majors:
+        description: 'PostgreSQL majors to build (space-separated)'
+        required: false
+        type: string
+        default: '16 17 18'
+      engines:
+        description: 'Engines to build (space-separated: postgresql mysql). Only the listed engines build.'
+        required: false
+        type: string
+        default: 'postgresql'
+      platforms:
+        description: "Platform-keys to build (space-separated: linux-x86_64 macos-arm64 macos-x86_64 windows-x86_64), or 'all'."
+        required: false
+        type: string
+        default: 'all'
+      include_macos_x64:
+        description: 'Include the macos-x86_64 cell (needs a scarce macos-13 Intel runner; off by default).'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-cli-tools-${{ github.ref }}
+  cancel-in-progress: false
+
+# "No secrets" is not "no credentials": a public workflow still gets GITHUB_TOKEN.
+# This job only reads the repo and uploads artifacts - grant nothing more.
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          INCLUDE='[{"os":"macos-14","arch":"arm64","platform_key":"macos-arm64"},{"os":"ubuntu-latest","arch":"x86_64","platform_key":"linux-x86_64"},{"os":"windows-latest","arch":"x86_64","platform_key":"windows-x86_64"}]'
+          if [ "${{ inputs.include_macos_x64 }}" = "true" ]; then
+            INCLUDE='[{"os":"macos-14","arch":"arm64","platform_key":"macos-arm64"},{"os":"macos-13","arch":"x86_64","platform_key":"macos-x86_64"},{"os":"ubuntu-latest","arch":"x86_64","platform_key":"linux-x86_64"},{"os":"windows-latest","arch":"x86_64","platform_key":"windows-x86_64"}]'
+          fi
+          if [ "${PLATFORMS}" != "all" ]; then
+            WANT="$(printf '%s' "$PLATFORMS" | jq -R -c 'split(" ") | map(select(length > 0))')"
+            INCLUDE="$(printf '%s' "$INCLUDE" | jq -c --argjson want "$WANT" 'map(select(.platform_key as $k | $want | index($k)))')"
+            if [ "$INCLUDE" = "[]" ]; then
+              echo "no matrix cells match platforms='${PLATFORMS}'" >&2
+              exit 1
+            fi
+          fi
+          echo "matrix={\"include\":$INCLUDE}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build bundles (${{ matrix.platform_key }})
+    needs: setup
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate majors input
+        shell: bash
+        run: |
+          if [[ ! "$MAJORS" =~ ^[0-9\ ]+$ ]]; then
+            echo "invalid majors input: must be space-separated integers" >&2
+            exit 1
+          fi
+        env:
+          MAJORS: ${{ inputs.majors }}
+
+      - name: Build macOS bundles
+        if: startsWith(matrix.os, 'macos') && contains(format(' {0} ', inputs.engines), ' postgresql ')
+        env:
+          MAJORS: ${{ inputs.majors }}
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          mkdir -p dist
+          for MAJOR in $MAJORS; do
+            echo "::group::postgresql@${MAJOR} (${{ matrix.platform_key }})"
+            if ! brew install "postgresql@${MAJOR}" >/dev/null 2>&1; then
+              echo "no postgresql@${MAJOR} formula for ${{ matrix.platform_key }} - omitting"
+              echo "::endgroup::"; continue
+            fi
+            BIN="$(brew --prefix "postgresql@${MAJOR}")/bin"
+            if [ ! -x "${BIN}/pg_dump" ]; then
+              echo "no pg_dump for postgresql@${MAJOR} (${{ matrix.platform_key }}) - omitting"
+              echo "::endgroup::"; continue
+            fi
+            ops/cli-tools/bundle_macos.sh "$BIN" "${MAJOR}" "${{ matrix.arch }}" dist
+            echo "::endgroup::"
+          done
+
+      - name: Build macOS MySQL bundle
+        if: startsWith(matrix.os, 'macos') && contains(format(' {0} ', inputs.engines), ' mysql ')
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          mkdir -p dist
+          echo "::group::mysql-client (${{ matrix.platform_key }})"
+          if ! brew install mysql-client >/dev/null 2>&1; then
+            echo "no mysql-client formula for ${{ matrix.platform_key }} - omitting"
+            echo "::endgroup::"; exit 0
+          fi
+          BIN="$(brew --prefix mysql-client)/bin"
+          if [ ! -x "${BIN}/mysqldump" ]; then
+            echo "no mysqldump for mysql-client (${{ matrix.platform_key }}) - omitting"
+            echo "::endgroup::"; exit 0
+          fi
+          MYSQL_MAJOR="$("${BIN}/mysqldump" --version | grep -oE 'Ver [0-9]+' | grep -oE '[0-9]+' | head -n1)"
+          if [ -z "$MYSQL_MAJOR" ]; then
+            echo "could not parse mysql-client major - omitting"
+            echo "::endgroup::"; exit 0
+          fi
+          BUNDLE_NAMESPACE=mysql BUNDLE_TOOLS="mysqldump mysql" \
+            ops/cli-tools/bundle_macos.sh "$BIN" "${MYSQL_MAJOR}" "${{ matrix.arch }}" dist
+          echo "::endgroup::"
+
+      - name: Build Linux bundles
+        if: startsWith(matrix.os, 'ubuntu') && contains(format(' {0} ', inputs.engines), ' postgresql ')
+        env:
+          MAJORS: ${{ inputs.majors }}
+        run: |
+          mkdir -p dist
+          for MAJOR in $MAJORS; do
+            echo "::group::postgresql ${MAJOR} (linux-x86_64)"
+            if ! docker pull "postgres:${MAJOR}" >/dev/null 2>&1; then
+              echo "no postgres:${MAJOR} image - omitting"
+              echo "::endgroup::"; continue
+            fi
+            CID="$(docker create "postgres:${MAJOR}")"
+            rm -rf "/tmp/pgbin${MAJOR}" && mkdir -p "/tmp/pgbin${MAJOR}"
+            docker cp "${CID}:/usr/lib/postgresql/${MAJOR}/bin/." "/tmp/pgbin${MAJOR}/" || true
+            docker cp "${CID}:/usr/lib/postgresql/${MAJOR}/lib/." "/tmp/pgbin${MAJOR}/lib/" 2>/dev/null || true
+            docker rm "${CID}" >/dev/null
+            if [ ! -x "/tmp/pgbin${MAJOR}/pg_dump" ]; then
+              echo "no pg_dump for postgresql ${MAJOR} - omitting"
+              echo "::endgroup::"; continue
+            fi
+            docker run --rm \
+              -v "$PWD:/work" -v "/tmp/pgbin${MAJOR}:/pgbin" -w /work \
+              postgres:${MAJOR} bash -c '
+                set -e
+                apt-get update -qq
+                apt-get install -y -qq patchelf zip python3 >/dev/null
+                /usr/lib/postgresql/'"${MAJOR}"'/bin/pg_dump --version >/dev/null 2>&1 || true
+                ops/cli-tools/bundle_linux.sh /usr/lib/postgresql/'"${MAJOR}"'/bin '"${MAJOR}"' x86_64 dist
+              '
+            echo "::endgroup::"
+          done
+
+      - name: Build Linux MySQL bundle
+        if: startsWith(matrix.os, 'ubuntu') && contains(format(' {0} ', inputs.engines), ' mysql ')
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          echo "::group::mysql (linux-x86_64)"
+          docker run --rm -v "$PWD:/work" -w /work debian:bookworm bash -c '
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq patchelf zip python3 ca-certificates wget gnupg >/dev/null
+            wget -qO /tmp/mysql.gpg https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 || {
+              echo "could not fetch the MySQL GPG key - omitting"; exit 0; }
+            gpg --dearmor < /tmp/mysql.gpg > /usr/share/keyrings/mysql.gpg
+            echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ bookworm mysql-8.0" \
+              > /etc/apt/sources.list.d/mysql.list
+            if ! apt-get update -qq; then
+              echo "MySQL APT repo update failed - omitting"; exit 0
+            fi
+            if ! apt-get install -y -qq mysql-community-client >/dev/null; then
+              echo "could not install mysql-community-client from the MySQL repo - omitting"; exit 0
+            fi
+            if [ ! -x /usr/bin/mysqldump ] || [ ! -x /usr/bin/mysql ]; then
+              echo "genuine Oracle mysqldump/mysql not found after install - omitting"; exit 0
+            fi
+            MYSQL_MAJOR="$(/usr/bin/mysqldump --version | grep -oE "Ver [0-9]+" | grep -oE "[0-9]+" | head -n1)"
+            if [ -z "${MYSQL_MAJOR}" ]; then
+              echo "could not parse the mysql client major - omitting"; exit 0
+            fi
+            echo "mysql client major: ${MYSQL_MAJOR}"
+            rm -rf /tmp/mysqlbin && mkdir -p /tmp/mysqlbin
+            cp -f /usr/bin/mysqldump /usr/bin/mysql /tmp/mysqlbin/
+            BUNDLE_NAMESPACE=mysql BUNDLE_TOOLS="mysqldump mysql" \
+              ops/cli-tools/bundle_linux.sh /tmp/mysqlbin "${MYSQL_MAJOR}" x86_64 dist
+          '
+          if ! ls dist/mysql-*-linux-x86_64.zip >/dev/null 2>&1; then
+            echo "no mysql linux bundle produced - omitted"
+          fi
+          echo "::endgroup::"
+
+      - name: Build Windows bundles
+        if: startsWith(matrix.os, 'windows') && contains(format(' {0} ', inputs.engines), ' postgresql ')
+        shell: pwsh
+        env:
+          MAJORS: ${{ inputs.majors }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $majors = $env:MAJORS.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+          foreach ($major in $majors) {
+            Write-Host "::group::postgresql $major (windows-x86_64)"
+            $url = $null
+            foreach ($minor in 20..0) {
+              $cand = "https://get.enterprisedb.com/postgresql/postgresql-$major.$minor-1-windows-x64-binaries.zip"
+              try {
+                Invoke-WebRequest -Uri $cand -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
+                $url = $cand; break
+              } catch { }
+            }
+            if (-not $url) {
+              Write-Host "no EDB binaries zip for postgresql $major - omitting"
+              Write-Host "::endgroup::"; continue
+            }
+            Write-Host "resolved $url"
+            $zipPath = "$env:RUNNER_TEMP\pg$major.zip"
+            Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+            $extract = "$env:RUNNER_TEMP\pg$major"
+            if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+            Expand-Archive -Path $zipPath -DestinationPath $extract -Force
+            $bin = Join-Path $extract 'pgsql\bin'
+            if (-not (Test-Path (Join-Path $bin 'pg_dump.exe'))) {
+              Write-Host "no pg_dump.exe for postgresql $major - omitting"
+              Write-Host "::endgroup::"; continue
+            }
+            ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -OutDir dist
+            Write-Host "::endgroup::"
+          }
+
+      - name: Build Windows MySQL bundle
+        if: startsWith(matrix.os, 'windows') && contains(format(' {0} ', inputs.engines), ' mysql ')
+        shell: pwsh
+        env:
+          MYSQL_MAJOR: '9'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $major = $env:MYSQL_MAJOR
+          Write-Host "::group::mysql $major (windows-x86_64)"
+          $url = $null
+          foreach ($minor in 4..0) {
+            foreach ($patch in 6..0) {
+              $cand = "https://dev.mysql.com/get/Downloads/MySQL-$major.$minor/mysql-$major.$minor.$patch-winx64.zip"
+              try {
+                Invoke-WebRequest -Uri $cand -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
+                $url = $cand; break
+              } catch { }
+            }
+            if ($url) { break }
+          }
+          if (-not $url) {
+            Write-Host "no MySQL Community zip for mysql $major - omitting"
+            Write-Host "::endgroup::"; exit 0
+          }
+          Write-Host "resolved $url"
+          $zipPath = "$env:RUNNER_TEMP\mysql$major.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+          $extract = "$env:RUNNER_TEMP\mysql$major"
+          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+          Expand-Archive -Path $zipPath -DestinationPath $extract -Force
+          $bin = Get-ChildItem -Path $extract -Directory | Select-Object -First 1 | ForEach-Object { Join-Path $_.FullName 'bin' }
+          if (-not $bin -or -not (Test-Path (Join-Path $bin 'mysqldump.exe'))) {
+            Write-Host "no mysqldump.exe for mysql $major - omitting"
+            Write-Host "::endgroup::"; exit 0
+          }
+          ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -Tools 'mysqldump mysql' -OutDir dist
+          Write-Host "::endgroup::"
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-tools-${{ matrix.platform_key }}
+          path: dist/*.zip
+          if-no-files-found: ignore
+          # Cross-run consumption: the private app repo's publish workflow pulls
+          # these later, so keep them longer than the pg intra-run 1-day retention.
+          retention-days: 7

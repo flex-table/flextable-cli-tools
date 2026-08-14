@@ -45,33 +45,30 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Read the env fallbacks in the BODY, not just the param defaults: a param default
-# ([string]$Tools = $env:BUNDLE_TOOLS) can come back empty for a space-containing value
-# under the Actions pwsh host even when the env var is set, so re-read here.
 if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = $env:BUNDLE_NAMESPACE }
 if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = 'postgresql' }
-if ([string]::IsNullOrWhiteSpace($Tools)) { $Tools = $env:BUNDLE_TOOLS }
-if ([string]::IsNullOrWhiteSpace($Tools)) {
-  # Derive the tool set from the namespace. Reliable even when a spaced -Tools /
-  # BUNDLE_TOOLS value fails to survive the Actions pwsh host's arg/env handling
-  # (a space-containing -Tools value came back empty; -Namespace binds fine).
-  $Tools = switch ($Namespace) {
-    'mysql'   { 'mysqldump mysql' }
-    'mariadb' { 'mariadb-dump mariadb' }
-    'mongodb' { 'mongodump mongorestore' }
-    default   { 'pg_dump pg_restore psql' }
-  }
-}
 
-# Split the space-separated tool list and append the .exe suffix each needs on
-# Windows (only if the caller did not already include it).
+# Tool names as an ARRAY per namespace. Deliberately NOT a space-separated string: under
+# the Actions pwsh host a space-containing value assigned to a variable came back empty
+# (observed via -Tools, BUNDLE_TOOLS, and even a literal), while -Namespace (no space) and
+# array literals are unaffected.
+$toolNames = switch ($Namespace) {
+  'mysql'   { @('mysqldump', 'mysql') }
+  'mariadb' { @('mariadb-dump', 'mariadb') }
+  'mongodb' { @('mongodump', 'mongorestore') }
+  default   { @('pg_dump', 'pg_restore', 'psql') }
+}
+# An explicit -Tools / BUNDLE_TOOLS list still overrides if it survived binding.
+if (-not [string]::IsNullOrWhiteSpace($Tools)) { $toolNames = $Tools -split '[\s,]+' | Where-Object { $_ -ne '' } }
+elseif (-not [string]::IsNullOrWhiteSpace($env:BUNDLE_TOOLS)) { $toolNames = $env:BUNDLE_TOOLS -split '[\s,]+' | Where-Object { $_ -ne '' } }
+
+# Append the .exe suffix Windows needs (unless the caller already included it).
 $tools = @()
-foreach ($t in ($Tools -split '[\s,]+' | Where-Object { $_ -ne '' })) {
+foreach ($t in $toolNames) {
   if ($t.ToLower().EndsWith('.exe')) { $tools += $t } else { $tools += "$t.exe" }
 }
-# Guard: an empty tool list (a mis-bound -Tools) would otherwise "copy" the bin dir
-# itself and silently zip an empty bundle.
-if ($tools.Count -eq 0) { throw "no tools to bundle (Tools='$Tools')" }
+Write-Host "DEBUG ns='$Namespace' tools=[$($tools -join '|')]"
+if ($tools.Count -eq 0) { throw "no tools to bundle (namespace='$Namespace')" }
 $name = "$Namespace-$Major-windows-$Arch"
 $stage = Join-Path $OutDir $name
 

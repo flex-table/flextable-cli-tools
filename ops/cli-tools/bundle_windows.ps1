@@ -51,7 +51,17 @@ $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = $env:BUNDLE_NAMESPACE }
 if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = 'postgresql' }
 if ([string]::IsNullOrWhiteSpace($Tools)) { $Tools = $env:BUNDLE_TOOLS }
-if ([string]::IsNullOrWhiteSpace($Tools)) { $Tools = 'pg_dump pg_restore psql' }
+if ([string]::IsNullOrWhiteSpace($Tools)) {
+  # Derive the tool set from the namespace. Reliable even when a spaced -Tools /
+  # BUNDLE_TOOLS value fails to survive the Actions pwsh host's arg/env handling
+  # (a space-containing -Tools value came back empty; -Namespace binds fine).
+  $Tools = switch ($Namespace) {
+    'mysql'   { 'mysqldump mysql' }
+    'mariadb' { 'mariadb-dump mariadb' }
+    'mongodb' { 'mongodump mongorestore' }
+    default   { 'pg_dump pg_restore psql' }
+  }
+}
 
 # Split the space-separated tool list and append the .exe suffix each needs on
 # Windows (only if the caller did not already include it).

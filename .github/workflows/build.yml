@@ -307,10 +307,9 @@ jobs:
             Write-Host "::endgroup::"; exit 0
           }
           Write-Host "mysqldump.exe: $((Get-Item $dump).Length) bytes"
-          # Comma-separated tools (no space): a space-containing -Tools / BUNDLE_TOOLS
-          # value came back empty under the Actions pwsh host; the script splits on
-          # space OR comma, so a comma list binds cleanly.
-          ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -Tools 'mysqldump,mysql' -OutDir dist
+          # Only pass -Namespace (which binds reliably); the script derives the tool set
+          # from it. A -Tools value did not bind under the Actions pwsh host.
+          ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -OutDir dist
           Write-Host "::endgroup::"
           # bundle_windows.ps1 completed (it did not throw); neutralize any non-zero
           # $LASTEXITCODE leaked by dumpbin during the PE-import walk so the step passes.

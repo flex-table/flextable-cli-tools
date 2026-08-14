@@ -96,6 +96,7 @@ foreach ($f in Get-ChildItem -Path $SrcBinDir -File) {
   $srcByName[$f.Name.ToLower()] = $f.FullName
 }
 
+Write-Host "DEBUG envTools=[$($env:BUNDLE_TOOLS)] Tools=[$Tools] toolsCount=$($tools.Count)"
 Write-Host "==> staging $name  [tools: $($tools -join ', ')] [ns: $Namespace]"
 foreach ($t in $tools) {
   $src = Join-Path $SrcBinDir $t

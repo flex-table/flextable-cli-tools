@@ -274,20 +274,24 @@ jobs:
           $series = $env:MYSQL_SERIES        # 8.4
           $major = $series.Split('.')[0]     # 8 - integer manifest key, matches mac/linux
           Write-Host "::group::mysql $series (windows-x86_64)"
-          # dev.mysql.com/get 302-redirects to a CDN and rejects a HEAD probe, so try a
-          # real GET download per patch (newest first) and accept the first that yields a
-          # real zip (> 1 MB; a "not found" response is a tiny HTML page).
+          # Use curl.exe (bundled on the runner): dev.mysql.com/get 302-redirects to a CDN
+          # and Invoke-WebRequest throws on it, but curl -L handles it. Probe with a HEAD
+          # (newest patch first), then download the first that exists.
           $zipPath = "$env:RUNNER_TEMP\mysql$major.zip"
-          $ok = $false
+          $found = $null
           foreach ($patch in 12..0) {
             $cand = "https://dev.mysql.com/get/Downloads/MySQL-$series/mysql-$series.$patch-winx64.zip"
-            try {
-              Invoke-WebRequest -Uri $cand -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
-              if ((Get-Item $zipPath).Length -gt 1000000) { Write-Host "resolved $cand"; $ok = $true; break }
-            } catch { }
+            curl.exe -sIL --fail -o NUL $cand 2>$null
+            if ($LASTEXITCODE -eq 0) { $found = $cand; break }
           }
-          if (-not $ok) {
+          if (-not $found) {
             Write-Host "no MySQL Community zip for mysql $series - omitting"
+            Write-Host "::endgroup::"; exit 0
+          }
+          Write-Host "resolved $found"
+          curl.exe -sL --fail -o $zipPath $found
+          if (-not (Test-Path $zipPath) -or (Get-Item $zipPath).Length -lt 1000000) {
+            Write-Host "download failed for $found - omitting"
             Write-Host "::endgroup::"; exit 0
           }
           $extract = "$env:RUNNER_TEMP\mysql$major"

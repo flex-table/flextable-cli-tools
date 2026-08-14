@@ -135,20 +135,24 @@ foreach ($t in $tools) {
 }
 
 Write-Host "==> zipping + sha256"
-$zip = Join-Path $OutDir "$name.zip"
-if (Test-Path $zip) { Remove-Item -Force $zip }
+if (Test-Path (Join-Path $OutDir "$name.zip")) { Remove-Item -Force (Join-Path $OutDir "$name.zip") }
+# ABSOLUTE paths: [ZipFile]::CreateFromDirectory resolves a RELATIVE path against
+# .NET's CurrentDirectory (NOT PowerShell's $PWD, which can differ), silently zipping
+# an empty/wrong dir -> a 0-byte bundle. Resolve both to full paths first.
+$stageFull = (Resolve-Path -LiteralPath $stage).Path
+$zipFull = Join-Path ((Resolve-Path -LiteralPath $OutDir).Path) "$name.zip"
 # The 4-arg overload with includeBaseDirectory=$true zips $stage AS a single
-# top-level wrapper dir (postgresql-<major>-windows-x86_64/...). The default
+# top-level wrapper dir (<namespace>-<major>-windows-x86_64/...). The default
 # (contents-only) overload would drop that wrapper and break detect_bundle_root,
 # which requires the zip's single top entry to be the bundle ROOT.
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+[System.IO.Compression.ZipFile]::CreateFromDirectory($stageFull, $zipFull, [System.IO.Compression.CompressionLevel]::Optimal, $true)
 
-$sha = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
-$sizeMb = [math]::Round((Get-Item $zip).Length / 1048576, 1)
+$sha = (Get-FileHash -Algorithm SHA256 -Path $zipFull).Hash.ToLower()
+$sizeMb = [math]::Round((Get-Item $zipFull).Length / 1048576, 1)
 
 Write-Host ""
-Write-Host "bundle : $zip"
+Write-Host "bundle : $zipFull"
 Write-Host "sha256 : $sha"
 Write-Host "sizeMb : $sizeMb"
 Write-Host "platform-key: windows-$Arch"

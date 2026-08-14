@@ -100,6 +100,9 @@ foreach ($t in $tools) {
   Copy-Item -Force -Path $src -Destination (Join-Path $stage $t)
 }
 
+Write-Host "DEBUG post-copy: PWD=$PWD NETCWD=$([System.Environment]::CurrentDirectory) stage=$stage"
+Get-ChildItem -Force $stage -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("DEBUG   [{0}] {1} {2}" -f $_.Mode, $_.Name, $_.Length) }
+
 Write-Host "==> walking the PE-import closure of the executables"
 # BFS over the transitive dependents. Seed with the 3 exes (already staged); for
 # each file, enqueue every imported DLL that EDB ships in $SrcBinDir and isn't yet

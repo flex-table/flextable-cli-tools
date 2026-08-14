@@ -56,7 +56,7 @@ if ([string]::IsNullOrWhiteSpace($Tools)) { $Tools = 'pg_dump pg_restore psql' }
 # Split the space-separated tool list and append the .exe suffix each needs on
 # Windows (only if the caller did not already include it).
 $tools = @()
-foreach ($t in ($Tools -split '\s+' | Where-Object { $_ -ne '' })) {
+foreach ($t in ($Tools -split '[\s,]+' | Where-Object { $_ -ne '' })) {
   if ($t.ToLower().EndsWith('.exe')) { $tools += $t } else { $tools += "$t.exe" }
 }
 # Guard: an empty tool list (a mis-bound -Tools) would otherwise "copy" the bin dir
@@ -101,14 +101,12 @@ foreach ($f in Get-ChildItem -Path $SrcBinDir -File) {
   $srcByName[$f.Name.ToLower()] = $f.FullName
 }
 
-Write-Host "DEBUG envTools=[$($env:BUNDLE_TOOLS)] Tools=[$Tools] toolsCount=$($tools.Count)"
-Write-Host "==> staging $name  [tools: $($tools -join ', ')] [ns: $Namespace]"
+Write-Host "==> staging $name  [tools: $($tools -join ', ')]"
 foreach ($t in $tools) {
   $src = Join-Path $SrcBinDir $t
   if (-not (Test-Path -LiteralPath $src)) { throw "missing executable: $src" }
   Copy-Item -Force -LiteralPath $src -Destination (Join-Path $stage $t)
 }
-Write-Host "DEBUG stage after copy: $(((Get-ChildItem -Force $stage) | ForEach-Object { $_.Name }) -join ', ')"
 
 Write-Host "==> walking the PE-import closure of the executables"
 # BFS over the transitive dependents. Seed with the 3 exes (already staged); for

@@ -54,6 +54,9 @@ $tools = @()
 foreach ($t in ($Tools -split '\s+' | Where-Object { $_ -ne '' })) {
   if ($t.ToLower().EndsWith('.exe')) { $tools += $t } else { $tools += "$t.exe" }
 }
+# Guard: an empty tool list (a mis-bound -Tools) would otherwise "copy" the bin dir
+# itself and silently zip an empty bundle.
+if ($tools.Count -eq 0) { throw "no tools to bundle (Tools='$Tools')" }
 $name = "$Namespace-$Major-windows-$Arch"
 $stage = Join-Path $OutDir $name
 
@@ -94,16 +97,11 @@ foreach ($f in Get-ChildItem -Path $SrcBinDir -File) {
 }
 
 Write-Host "==> staging $name"
-Write-Host "DEBUG SrcBinDir='$SrcBinDir' tools=[$($tools -join ',')] Tools-raw='$Tools'"
 foreach ($t in $tools) {
   $src = Join-Path $SrcBinDir $t
-  Write-Host "DEBUG copy t='$t' src='$src' exists=$(Test-Path -LiteralPath $src)"
   if (-not (Test-Path -LiteralPath $src)) { throw "missing executable: $src" }
   Copy-Item -Force -LiteralPath $src -Destination (Join-Path $stage $t)
 }
-
-Write-Host "DEBUG post-copy stage:"
-Get-ChildItem -Force $stage -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("DEBUG   [{0}] {1} {2}" -f $_.Mode, $_.Name, $_.Length) }
 
 Write-Host "==> walking the PE-import closure of the executables"
 # BFS over the transitive dependents. Seed with the 3 exes (already staged); for

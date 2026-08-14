@@ -94,13 +94,15 @@ foreach ($f in Get-ChildItem -Path $SrcBinDir -File) {
 }
 
 Write-Host "==> staging $name"
+Write-Host "DEBUG SrcBinDir='$SrcBinDir' tools=[$($tools -join ',')] Tools-raw='$Tools'"
 foreach ($t in $tools) {
   $src = Join-Path $SrcBinDir $t
-  if (-not (Test-Path $src)) { throw "missing executable: $src" }
-  Copy-Item -Force -Path $src -Destination (Join-Path $stage $t)
+  Write-Host "DEBUG copy t='$t' src='$src' exists=$(Test-Path -LiteralPath $src)"
+  if (-not (Test-Path -LiteralPath $src)) { throw "missing executable: $src" }
+  Copy-Item -Force -LiteralPath $src -Destination (Join-Path $stage $t)
 }
 
-Write-Host "DEBUG post-copy: PWD=$PWD NETCWD=$([System.Environment]::CurrentDirectory) stage=$stage"
+Write-Host "DEBUG post-copy stage:"
 Get-ChildItem -Force $stage -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("DEBUG   [{0}] {1} {2}" -f $_.Mode, $_.Name, $_.Length) }
 
 Write-Host "==> walking the PE-import closure of the executables"

@@ -45,7 +45,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Read the env fallbacks in the BODY, not just the param defaults: a param default
+# ([string]$Tools = $env:BUNDLE_TOOLS) can come back empty for a space-containing value
+# under the Actions pwsh host even when the env var is set, so re-read here.
+if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = $env:BUNDLE_NAMESPACE }
 if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = 'postgresql' }
+if ([string]::IsNullOrWhiteSpace($Tools)) { $Tools = $env:BUNDLE_TOOLS }
 if ([string]::IsNullOrWhiteSpace($Tools)) { $Tools = 'pg_dump pg_restore psql' }
 
 # Split the space-separated tool list and append the .exe suffix each needs on

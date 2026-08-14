@@ -96,12 +96,13 @@ foreach ($f in Get-ChildItem -Path $SrcBinDir -File) {
   $srcByName[$f.Name.ToLower()] = $f.FullName
 }
 
-Write-Host "==> staging $name"
+Write-Host "==> staging $name  [tools: $($tools -join ', ')] [ns: $Namespace]"
 foreach ($t in $tools) {
   $src = Join-Path $SrcBinDir $t
   if (-not (Test-Path -LiteralPath $src)) { throw "missing executable: $src" }
   Copy-Item -Force -LiteralPath $src -Destination (Join-Path $stage $t)
 }
+Write-Host "DEBUG stage after copy: $(((Get-ChildItem -Force $stage) | ForEach-Object { $_.Name }) -join ', ')"
 
 Write-Host "==> walking the PE-import closure of the executables"
 # BFS over the transitive dependents. Seed with the 3 exes (already staged); for

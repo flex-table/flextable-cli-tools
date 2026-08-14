@@ -188,9 +188,15 @@ jobs:
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
             apt-get install -y -qq patchelf zip python3 ca-certificates wget gnupg >/dev/null
-            wget -qO /tmp/mysql.gpg https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 || {
-              echo "could not fetch the MySQL GPG key - omitting"; exit 0; }
-            gpg --dearmor < /tmp/mysql.gpg > /usr/share/keyrings/mysql.gpg
+            # 2025 key: the 2023 key (B7B3B788A8D3785C) expired -> apt EXPKEYSIG. The 2025
+            # file renews it (extended expiry). Import both so whichever signs the repo works.
+            : > /usr/share/keyrings/mysql.gpg
+            for KF in RPM-GPG-KEY-mysql-2025 RPM-GPG-KEY-mysql; do
+              wget -qO- "https://repo.mysql.com/$KF" 2>/dev/null | gpg --dearmor >> /usr/share/keyrings/mysql.gpg 2>/dev/null || true
+            done
+            if [ ! -s /usr/share/keyrings/mysql.gpg ]; then
+              echo "could not fetch any MySQL GPG key - omitting"; exit 0
+            fi
             # mysql-8.4-lts (not mysql-8.0, which repo.mysql.com no longer serves for
             # bookworm -> apt-get update 404s). 8.4 LTS = integer major 8, matching mac/win.
             echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ bookworm mysql-8.4-lts" \
@@ -268,21 +274,22 @@ jobs:
           $series = $env:MYSQL_SERIES        # 8.4
           $major = $series.Split('.')[0]     # 8 - integer manifest key, matches mac/linux
           Write-Host "::group::mysql $series (windows-x86_64)"
-          $url = $null
+          # dev.mysql.com/get 302-redirects to a CDN and rejects a HEAD probe, so try a
+          # real GET download per patch (newest first) and accept the first that yields a
+          # real zip (> 1 MB; a "not found" response is a tiny HTML page).
+          $zipPath = "$env:RUNNER_TEMP\mysql$major.zip"
+          $ok = $false
           foreach ($patch in 12..0) {
             $cand = "https://dev.mysql.com/get/Downloads/MySQL-$series/mysql-$series.$patch-winx64.zip"
             try {
-              Invoke-WebRequest -Uri $cand -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
-              $url = $cand; break
+              Invoke-WebRequest -Uri $cand -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+              if ((Get-Item $zipPath).Length -gt 1000000) { Write-Host "resolved $cand"; $ok = $true; break }
             } catch { }
           }
-          if (-not $url) {
-            Write-Host "no MySQL Community zip for mysql $major - omitting"
+          if (-not $ok) {
+            Write-Host "no MySQL Community zip for mysql $series - omitting"
             Write-Host "::endgroup::"; exit 0
           }
-          Write-Host "resolved $url"
-          $zipPath = "$env:RUNNER_TEMP\mysql$major.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
           $extract = "$env:RUNNER_TEMP\mysql$major"
           if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
           Expand-Archive -Path $zipPath -DestinationPath $extract -Force

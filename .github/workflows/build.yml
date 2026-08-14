@@ -123,12 +123,14 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: '1'
         run: |
           mkdir -p dist
-          echo "::group::mysql-client (${{ matrix.platform_key }})"
-          if ! brew install mysql-client >/dev/null 2>&1; then
-            echo "no mysql-client formula for ${{ matrix.platform_key }} - omitting"
+          # Pin 8.4 LTS so all platforms share ONE integer major (8); brew's default
+          # mysql-client is 9.x, which diverges from Linux/Windows (see #497).
+          echo "::group::mysql-client@8.4 (${{ matrix.platform_key }})"
+          if ! brew install mysql-client@8.4 >/dev/null 2>&1; then
+            echo "no mysql-client@8.4 formula for ${{ matrix.platform_key }} - omitting"
             echo "::endgroup::"; exit 0
           fi
-          BIN="$(brew --prefix mysql-client)/bin"
+          BIN="$(brew --prefix mysql-client@8.4)/bin"
           if [ ! -x "${BIN}/mysqldump" ]; then
             echo "no mysqldump for mysql-client (${{ matrix.platform_key }}) - omitting"
             echo "::endgroup::"; exit 0
@@ -189,7 +191,9 @@ jobs:
             wget -qO /tmp/mysql.gpg https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 || {
               echo "could not fetch the MySQL GPG key - omitting"; exit 0; }
             gpg --dearmor < /tmp/mysql.gpg > /usr/share/keyrings/mysql.gpg
-            echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ bookworm mysql-8.0" \
+            # mysql-8.4-lts (not mysql-8.0, which repo.mysql.com no longer serves for
+            # bookworm -> apt-get update 404s). 8.4 LTS = integer major 8, matching mac/win.
+            echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ bookworm mysql-8.4-lts" \
               > /etc/apt/sources.list.d/mysql.list
             if ! apt-get update -qq; then
               echo "MySQL APT repo update failed - omitting"; exit 0
@@ -256,21 +260,21 @@ jobs:
         if: startsWith(matrix.os, 'windows') && contains(format(' {0} ', inputs.engines), ' mysql ')
         shell: pwsh
         env:
-          MYSQL_MAJOR: '9'
+          # 8.4 LTS: publishes a winx64.zip (9.x ships an MSI only, no zip) and shares
+          # integer major 8 with mac/linux (#497).
+          MYSQL_SERIES: '8.4'
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $major = $env:MYSQL_MAJOR
-          Write-Host "::group::mysql $major (windows-x86_64)"
+          $series = $env:MYSQL_SERIES        # 8.4
+          $major = $series.Split('.')[0]     # 8 - integer manifest key, matches mac/linux
+          Write-Host "::group::mysql $series (windows-x86_64)"
           $url = $null
-          foreach ($minor in 4..0) {
-            foreach ($patch in 6..0) {
-              $cand = "https://dev.mysql.com/get/Downloads/MySQL-$major.$minor/mysql-$major.$minor.$patch-winx64.zip"
-              try {
-                Invoke-WebRequest -Uri $cand -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
-                $url = $cand; break
-              } catch { }
-            }
-            if ($url) { break }
+          foreach ($patch in 12..0) {
+            $cand = "https://dev.mysql.com/get/Downloads/MySQL-$series/mysql-$series.$patch-winx64.zip"
+            try {
+              Invoke-WebRequest -Uri $cand -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
+              $url = $cand; break
+            } catch { }
           }
           if (-not $url) {
             Write-Host "no MySQL Community zip for mysql $major - omitting"

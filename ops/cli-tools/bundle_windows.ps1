@@ -108,10 +108,11 @@ foreach ($f in Get-ChildItem -Path $SrcBinDir -File) {
   $srcByName[$f.Name.ToLower()] = $f.FullName
 }
 
-Write-Host "==> staging $name  [tools: $($tools -join ', ')]"
+Write-Host "==> staging $name (tool count: $($tools.Count))"
 foreach ($t in $tools) {
+  Write-Host "DEBUG-tool len=$($t.Length) val=<$t>"
   $src = Join-Path $SrcBinDir $t
-  if (-not (Test-Path -LiteralPath $src)) { throw "missing executable: $src" }
+  if (-not (Test-Path -LiteralPath $src)) { throw "missing executable src=<$src>" }
   Copy-Item -Force -LiteralPath $src -Destination (Join-Path $stage $t)
 }
 

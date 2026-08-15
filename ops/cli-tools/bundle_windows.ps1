@@ -49,16 +49,16 @@ if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = $env:BUNDLE_NAMESPA
 if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = 'postgresql' }
 
 # The tool set (with .exe) as a namespace-keyed ARRAY LITERAL. Built directly - NOT via a
-# space-separated string nor a `$tools += ...` accumulation loop, both of which the Actions
+# space-separated string nor a `$exeSet += ...` accumulation loop, both of which the Actions
 # pwsh host mangled here (a spaced value came back empty; the += loop concatenated the two
 # names into one element 'mysqldump.exemysql.exe'). Add a namespace case for a new engine.
-$tools = switch ($Namespace) {
+$exeSet = switch ($Namespace) {
   'mysql'   { @('mysqldump.exe', 'mysql.exe') }
   'mariadb' { @('mariadb-dump.exe', 'mariadb.exe') }
   'mongodb' { @('mongodump.exe', 'mongorestore.exe') }
   default   { @('pg_dump.exe', 'pg_restore.exe', 'psql.exe') }
 }
-if ($tools.Count -eq 0) { throw "no tools to bundle (namespace='$Namespace')" }
+if ($exeSet.Count -eq 0) { throw "no tools to bundle (namespace='$Namespace')" }
 $name = "$Namespace-$Major-windows-$Arch"
 $stage = Join-Path $OutDir $name
 
@@ -98,8 +98,8 @@ foreach ($f in Get-ChildItem -Path $SrcBinDir -File) {
   $srcByName[$f.Name.ToLower()] = $f.FullName
 }
 
-Write-Host "==> staging $name ($($tools.Count) tools)"
-foreach ($t in $tools) {
+Write-Host "==> staging $name ($($exeSet.Count) tools)"
+foreach ($t in $exeSet) {
   $src = Join-Path $SrcBinDir $t
   if (-not (Test-Path -LiteralPath $src)) { throw "missing executable: $src" }
   Copy-Item -Force -LiteralPath $src -Destination (Join-Path $stage $t)
@@ -111,10 +111,10 @@ Write-Host "==> walking the PE-import closure of the executables"
 # staged, copying it next to the exes at the top level. A dependent NOT in
 # $SrcBinDir is a system DLL and is skipped - no fixed glob, no path rewriting.
 $staged = @{}
-foreach ($t in $tools) { $staged[$t.ToLower()] = $true }
+foreach ($t in $exeSet) { $staged[$t.ToLower()] = $true }
 
 $queue = [System.Collections.Queue]::new()
-foreach ($t in $tools) { $queue.Enqueue((Join-Path $stage $t)) }
+foreach ($t in $exeSet) { $queue.Enqueue((Join-Path $stage $t)) }
 
 while ($queue.Count -gt 0) {
   $file = $queue.Dequeue()
@@ -135,7 +135,7 @@ while ($queue.Count -gt 0) {
 if ($Namespace -eq 'postgresql' -and -not (Test-Path (Join-Path $stage 'libpq.dll'))) {
   throw "libpq.dll not found in the import closure of $SrcBinDir - the bundle would not run on a clean host"
 }
-foreach ($t in $tools) {
+foreach ($t in $exeSet) {
   if (-not (Test-Path (Join-Path $stage $t))) { throw "missing executable in stage: $t" }
 }
 

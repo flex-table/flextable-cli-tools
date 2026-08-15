@@ -149,25 +149,23 @@ jobs:
         env:
           HOMEBREW_NO_INSTALL_CLEANUP: '1'
           HOMEBREW_NO_AUTO_UPDATE: '1'
+          # Pin the 11.4 LTS keg so the integer major is a DETERMINISTIC 11 on every
+          # platform. mariadb-dump --version prints "Distrib 11.4.x-MariaDB" (no plain
+          # "Ver <n>" token), and brew's default `mariadb` can jump majors - both would
+          # break the same-major-across-platforms rule. MariaDB is its OWN namespace
+          # (not `mysql`): the app downloads/resolves under tools/mariadb-<major>/,
+          # keyed by the connection type the FE already sends.
+          MARIADB_MAJOR: '11'
         run: |
           mkdir -p dist
-          # brew's `mariadb` formula tracks the current stable (11.x LTS line); its
-          # bin/ ships mariadb-dump + mariadb - the client tools FlexTable shells out
-          # to. MariaDB is its OWN namespace (not `mysql`): the app downloads/resolves
-          # MariaDB tools under `tools/mariadb-<major>/`, keyed by connection type.
-          echo "::group::mariadb (${{ matrix.platform_key }})"
-          if ! brew install mariadb >/dev/null 2>&1; then
-            echo "no mariadb formula for ${{ matrix.platform_key }} - omitting"
+          echo "::group::mariadb@11.4 (${{ matrix.platform_key }})"
+          if ! brew install mariadb@11.4 >/dev/null 2>&1; then
+            echo "no mariadb@11.4 formula for ${{ matrix.platform_key }} - omitting"
             echo "::endgroup::"; exit 0
           fi
-          BIN="$(brew --prefix mariadb)/bin"
+          BIN="$(brew --prefix mariadb@11.4)/bin"
           if [ ! -x "${BIN}/mariadb-dump" ]; then
-            echo "no mariadb-dump for mariadb (${{ matrix.platform_key }}) - omitting"
-            echo "::endgroup::"; exit 0
-          fi
-          MARIADB_MAJOR="$("${BIN}/mariadb-dump" --version | grep -oE 'Ver [0-9]+' | grep -oE '[0-9]+' | head -n1)"
-          if [ -z "$MARIADB_MAJOR" ]; then
-            echo "could not parse mariadb-dump major - omitting"
+            echo "no mariadb-dump for mariadb@11.4 (${{ matrix.platform_key }}) - omitting"
             echo "::endgroup::"; exit 0
           fi
           BUNDLE_NAMESPACE=mariadb BUNDLE_TOOLS="mariadb-dump mariadb" \
@@ -258,32 +256,36 @@ jobs:
       - name: Build Linux MariaDB bundle
         if: startsWith(matrix.os, 'ubuntu') && contains(format(' {0} ', inputs.engines), ' mariadb ')
         env:
-          MARIADB_SERIES: '11.4'
+          # 11.4 LTS -> integer major 11, matching mac/windows.
+          MARIADB_MAJOR: '11'
         run: |
           set -euo pipefail
           mkdir -p dist
-          echo "::group::mariadb ${MARIADB_SERIES} (linux-x86_64)"
-          # The official mariadb image is Ubuntu-based (has apt + patchelf-installable)
-          # and ships the client tools in /usr/bin, so - unlike the Oracle-Linux-slim
-          # mysql image - we bundle INSIDE it (the pg in-container pattern) rather than
-          # docker-cp'ing out. 11.4 is the current LTS -> integer major 11.
-          if ! docker pull "mariadb:${MARIADB_SERIES}" >/dev/null 2>&1; then
-            echo "no mariadb:${MARIADB_SERIES} image - omitting"
-            echo "::endgroup::"; exit 0
-          fi
-          docker run --rm -v "$PWD:/work" -w /work "mariadb:${MARIADB_SERIES}" bash -c '
+          echo "::group::mariadb 11.4 (linux-x86_64)"
+          # Same proven pattern as the MySQL step: a CLEAN debian:bookworm base + the
+          # vendor's apt client repo, NOT the mariadb server image (whose entrypoint +
+          # apt sources are unreliable). Debian only ships MariaDB 10.11, so we add the
+          # MariaDB 11.4 LTS repo to get integer major 11. Bundle runs INSIDE the
+          # container so ldd resolves the client's .so closure.
+          docker run --rm -v "$PWD:/work" -w /work -e MARIADB_MAJOR debian:bookworm bash -c '
             set -euo pipefail
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
-            apt-get install -y -qq patchelf zip python3 >/dev/null
+            apt-get install -y -qq patchelf zip python3 ca-certificates curl gnupg >/dev/null
+            curl -fsSL https://mariadb.org/mariadb_release_signing_key.pgp \
+              | gpg --dearmor > /usr/share/keyrings/mariadb.gpg
+            echo "deb [signed-by=/usr/share/keyrings/mariadb.gpg] https://deb.mariadb.org/11.4/debian bookworm main" \
+              > /etc/apt/sources.list.d/mariadb.list
+            if ! apt-get update -qq; then
+              echo "MariaDB apt repo update failed - omitting"; exit 0
+            fi
+            if ! apt-get install -y -qq mariadb-client >/dev/null; then
+              echo "could not install mariadb-client from the MariaDB repo - omitting"; exit 0
+            fi
             if [ ! -x /usr/bin/mariadb-dump ] || [ ! -x /usr/bin/mariadb ]; then
-              echo "mariadb-dump/mariadb not found in image - omitting"; exit 0
+              echo "mariadb-dump/mariadb not found after install - omitting"; exit 0
             fi
-            MARIADB_MAJOR="$(/usr/bin/mariadb-dump --version | grep -oE "Ver [0-9]+" | grep -oE "[0-9]+" | head -n1)"
-            if [ -z "${MARIADB_MAJOR}" ]; then
-              echo "could not parse the mariadb client major - omitting"; exit 0
-            fi
-            echo "mariadb client major: ${MARIADB_MAJOR}"
+            echo "mariadb client: $(/usr/bin/mariadb-dump --version)"
             rm -rf /tmp/mariadbbin && mkdir -p /tmp/mariadbbin
             cp -f /usr/bin/mariadb-dump /usr/bin/mariadb /tmp/mariadbbin/
             BUNDLE_NAMESPACE=mariadb BUNDLE_TOOLS="mariadb-dump mariadb" \

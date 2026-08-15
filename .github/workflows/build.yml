@@ -123,12 +123,14 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: '1'
         run: |
           mkdir -p dist
-          echo "::group::mysql-client (${{ matrix.platform_key }})"
-          if ! brew install mysql-client >/dev/null 2>&1; then
-            echo "no mysql-client formula for ${{ matrix.platform_key }} - omitting"
+          # Pin 8.4 LTS so all platforms share ONE integer major (8); brew's default
+          # mysql-client is 9.x, which diverges from Linux/Windows (see #497).
+          echo "::group::mysql-client@8.4 (${{ matrix.platform_key }})"
+          if ! brew install mysql-client@8.4 >/dev/null 2>&1; then
+            echo "no mysql-client@8.4 formula for ${{ matrix.platform_key }} - omitting"
             echo "::endgroup::"; exit 0
           fi
-          BIN="$(brew --prefix mysql-client)/bin"
+          BIN="$(brew --prefix mysql-client@8.4)/bin"
           if [ ! -x "${BIN}/mysqldump" ]; then
             echo "no mysqldump for mysql-client (${{ matrix.platform_key }}) - omitting"
             echo "::endgroup::"; exit 0
@@ -186,10 +188,18 @@ jobs:
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
             apt-get install -y -qq patchelf zip python3 ca-certificates wget gnupg >/dev/null
-            wget -qO /tmp/mysql.gpg https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 || {
-              echo "could not fetch the MySQL GPG key - omitting"; exit 0; }
-            gpg --dearmor < /tmp/mysql.gpg > /usr/share/keyrings/mysql.gpg
-            echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ bookworm mysql-8.0" \
+            # 2025 key: the 2023 key (B7B3B788A8D3785C) expired -> apt EXPKEYSIG. The 2025
+            # file renews it (extended expiry). Import both so whichever signs the repo works.
+            : > /usr/share/keyrings/mysql.gpg
+            for KF in RPM-GPG-KEY-mysql-2025 RPM-GPG-KEY-mysql; do
+              wget -qO- "https://repo.mysql.com/$KF" 2>/dev/null | gpg --dearmor >> /usr/share/keyrings/mysql.gpg 2>/dev/null || true
+            done
+            if [ ! -s /usr/share/keyrings/mysql.gpg ]; then
+              echo "could not fetch any MySQL GPG key - omitting"; exit 0
+            fi
+            # mysql-8.4-lts (not mysql-8.0, which repo.mysql.com no longer serves for
+            # bookworm -> apt-get update 404s). 8.4 LTS = integer major 8, matching mac/win.
+            echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ bookworm mysql-8.4-lts" \
               > /etc/apt/sources.list.d/mysql.list
             if ! apt-get update -qq; then
               echo "MySQL APT repo update failed - omitting"; exit 0
@@ -256,39 +266,52 @@ jobs:
         if: startsWith(matrix.os, 'windows') && contains(format(' {0} ', inputs.engines), ' mysql ')
         shell: pwsh
         env:
-          MYSQL_MAJOR: '9'
+          # 8.4 LTS: publishes a winx64.zip (9.x ships an MSI only, no zip) and shares
+          # integer major 8 with mac/linux (#497).
+          MYSQL_SERIES: '8.4'
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $major = $env:MYSQL_MAJOR
-          Write-Host "::group::mysql $major (windows-x86_64)"
-          $url = $null
-          foreach ($minor in 4..0) {
-            foreach ($patch in 6..0) {
-              $cand = "https://dev.mysql.com/get/Downloads/MySQL-$major.$minor/mysql-$major.$minor.$patch-winx64.zip"
-              try {
-                Invoke-WebRequest -Uri $cand -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null
-                $url = $cand; break
-              } catch { }
-            }
-            if ($url) { break }
+          $series = $env:MYSQL_SERIES        # 8.4
+          $major = $series.Split('.')[0]     # 8 - integer manifest key, matches mac/linux
+          Write-Host "::group::mysql $series (windows-x86_64)"
+          # Use curl.exe (bundled on the runner): dev.mysql.com/get 302-redirects to a CDN
+          # and Invoke-WebRequest throws on it, but curl -L handles it. Probe with a HEAD
+          # (newest patch first), then download the first that exists.
+          $zipPath = "$env:RUNNER_TEMP\mysql$major.zip"
+          $found = $null
+          foreach ($patch in 12..0) {
+            $cand = "https://dev.mysql.com/get/Downloads/MySQL-$series/mysql-$series.$patch-winx64.zip"
+            curl.exe -sIL --fail -o NUL $cand 2>$null
+            if ($LASTEXITCODE -eq 0) { $found = $cand; break }
           }
-          if (-not $url) {
-            Write-Host "no MySQL Community zip for mysql $major - omitting"
+          if (-not $found) {
+            Write-Host "no MySQL Community zip for mysql $series - omitting"
             Write-Host "::endgroup::"; exit 0
           }
-          Write-Host "resolved $url"
-          $zipPath = "$env:RUNNER_TEMP\mysql$major.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+          Write-Host "resolved $found"
+          curl.exe -sL --fail -o $zipPath $found
+          if (-not (Test-Path $zipPath) -or (Get-Item $zipPath).Length -lt 1000000) {
+            Write-Host "download failed for $found - omitting"
+            Write-Host "::endgroup::"; exit 0
+          }
           $extract = "$env:RUNNER_TEMP\mysql$major"
           if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
-          Expand-Archive -Path $zipPath -DestinationPath $extract -Force
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          # tar.exe (bsdtar, present on every Windows runner) is far more reliable than
+          # Expand-Archive on MySQL's ~500 MB full zip, which can leave 0-byte stub files.
+          tar.exe -xf $zipPath -C $extract
           $bin = Get-ChildItem -Path $extract -Directory | Select-Object -First 1 | ForEach-Object { Join-Path $_.FullName 'bin' }
-          if (-not $bin -or -not (Test-Path (Join-Path $bin 'mysqldump.exe'))) {
-            Write-Host "no mysqldump.exe for mysql $major - omitting"
+          $dump = if ($bin) { Join-Path $bin 'mysqldump.exe' } else { $null }
+          if (-not $dump -or -not (Test-Path $dump) -or (Get-Item $dump).Length -lt 100000) {
+            Write-Host "mysqldump.exe missing/empty for mysql $series - omitting"
             Write-Host "::endgroup::"; exit 0
           }
-          ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -Tools 'mysqldump mysql' -OutDir dist
+          Write-Host "mysqldump.exe: $((Get-Item $dump).Length) bytes"
+          # Only pass -Namespace (binds reliably); the script derives the tool set from it.
+          ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -OutDir dist
           Write-Host "::endgroup::"
+          # neutralize any non-zero $LASTEXITCODE leaked by dumpbin/curl so the step passes.
+          exit 0
 
       - name: Upload bundles
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -45,15 +45,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = $env:BUNDLE_NAMESPACE }
 if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = 'postgresql' }
-if ([string]::IsNullOrWhiteSpace($Tools)) { $Tools = 'pg_dump pg_restore psql' }
 
-# Split the space-separated tool list and append the .exe suffix each needs on
-# Windows (only if the caller did not already include it).
-$tools = @()
-foreach ($t in ($Tools -split '\s+' | Where-Object { $_ -ne '' })) {
-  if ($t.ToLower().EndsWith('.exe')) { $tools += $t } else { $tools += "$t.exe" }
+# The tool set (with .exe) as a namespace-keyed ARRAY LITERAL. Built directly - NOT via a
+# space-separated string nor a `$exeSet += ...` accumulation loop, both of which the Actions
+# pwsh host mangled here (a spaced value came back empty; the += loop concatenated the two
+# names into one element 'mysqldump.exemysql.exe'). Add a namespace case for a new engine.
+$exeSet = switch ($Namespace) {
+  'mysql'   { @('mysqldump.exe', 'mysql.exe') }
+  'mariadb' { @('mariadb-dump.exe', 'mariadb.exe') }
+  'mongodb' { @('mongodump.exe', 'mongorestore.exe') }
+  default   { @('pg_dump.exe', 'pg_restore.exe', 'psql.exe') }
 }
+if ($exeSet.Count -eq 0) { throw "no tools to bundle (namespace='$Namespace')" }
 $name = "$Namespace-$Major-windows-$Arch"
 $stage = Join-Path $OutDir $name
 
@@ -93,11 +98,11 @@ foreach ($f in Get-ChildItem -Path $SrcBinDir -File) {
   $srcByName[$f.Name.ToLower()] = $f.FullName
 }
 
-Write-Host "==> staging $name"
-foreach ($t in $tools) {
+Write-Host "==> staging $name ($($exeSet.Count) tools)"
+foreach ($t in $exeSet) {
   $src = Join-Path $SrcBinDir $t
-  if (-not (Test-Path $src)) { throw "missing executable: $src" }
-  Copy-Item -Force -Path $src -Destination (Join-Path $stage $t)
+  if (-not (Test-Path -LiteralPath $src)) { throw "missing executable: $src" }
+  Copy-Item -Force -LiteralPath $src -Destination (Join-Path $stage $t)
 }
 
 Write-Host "==> walking the PE-import closure of the executables"
@@ -106,10 +111,10 @@ Write-Host "==> walking the PE-import closure of the executables"
 # staged, copying it next to the exes at the top level. A dependent NOT in
 # $SrcBinDir is a system DLL and is skipped - no fixed glob, no path rewriting.
 $staged = @{}
-foreach ($t in $tools) { $staged[$t.ToLower()] = $true }
+foreach ($t in $exeSet) { $staged[$t.ToLower()] = $true }
 
 $queue = [System.Collections.Queue]::new()
-foreach ($t in $tools) { $queue.Enqueue((Join-Path $stage $t)) }
+foreach ($t in $exeSet) { $queue.Enqueue((Join-Path $stage $t)) }
 
 while ($queue.Count -gt 0) {
   $file = $queue.Dequeue()
@@ -130,25 +135,29 @@ while ($queue.Count -gt 0) {
 if ($Namespace -eq 'postgresql' -and -not (Test-Path (Join-Path $stage 'libpq.dll'))) {
   throw "libpq.dll not found in the import closure of $SrcBinDir - the bundle would not run on a clean host"
 }
-foreach ($t in $tools) {
+foreach ($t in $exeSet) {
   if (-not (Test-Path (Join-Path $stage $t))) { throw "missing executable in stage: $t" }
 }
 
 Write-Host "==> zipping + sha256"
-$zip = Join-Path $OutDir "$name.zip"
-if (Test-Path $zip) { Remove-Item -Force $zip }
+if (Test-Path (Join-Path $OutDir "$name.zip")) { Remove-Item -Force (Join-Path $OutDir "$name.zip") }
+# ABSOLUTE paths: [ZipFile]::CreateFromDirectory resolves a RELATIVE path against
+# .NET's CurrentDirectory (NOT PowerShell's $PWD, which can differ), silently zipping
+# an empty/wrong dir -> a 0-byte bundle. Resolve both to full paths first.
+$stageFull = (Resolve-Path -LiteralPath $stage).Path
+$zipFull = Join-Path ((Resolve-Path -LiteralPath $OutDir).Path) "$name.zip"
 # The 4-arg overload with includeBaseDirectory=$true zips $stage AS a single
-# top-level wrapper dir (postgresql-<major>-windows-x86_64/...). The default
+# top-level wrapper dir (<namespace>-<major>-windows-x86_64/...). The default
 # (contents-only) overload would drop that wrapper and break detect_bundle_root,
 # which requires the zip's single top entry to be the bundle ROOT.
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+[System.IO.Compression.ZipFile]::CreateFromDirectory($stageFull, $zipFull, [System.IO.Compression.CompressionLevel]::Optimal, $true)
 
-$sha = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
-$sizeMb = [math]::Round((Get-Item $zip).Length / 1048576, 1)
+$sha = (Get-FileHash -Algorithm SHA256 -Path $zipFull).Hash.ToLower()
+$sizeMb = [math]::Round((Get-Item $zipFull).Length / 1048576, 1)
 
 Write-Host ""
-Write-Host "bundle : $zip"
+Write-Host "bundle : $zipFull"
 Write-Host "sha256 : $sha"
 Write-Host "sizeMb : $sizeMb"
 Write-Host "platform-key: windows-$Arch"

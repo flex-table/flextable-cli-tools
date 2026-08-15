@@ -24,7 +24,7 @@ on:
         type: string
         default: '16 17 18'
       engines:
-        description: 'Engines to build (space-separated: postgresql mysql). Only the listed engines build.'
+        description: 'Engines to build (space-separated: postgresql mysql mariadb). Only the listed engines build.'
         required: false
         type: string
         default: 'postgresql'
@@ -144,6 +144,36 @@ jobs:
             ops/cli-tools/bundle_macos.sh "$BIN" "${MYSQL_MAJOR}" "${{ matrix.arch }}" dist
           echo "::endgroup::"
 
+      - name: Build macOS MariaDB bundle
+        if: startsWith(matrix.os, 'macos') && contains(format(' {0} ', inputs.engines), ' mariadb ')
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          mkdir -p dist
+          # brew's `mariadb` formula tracks the current stable (11.x LTS line); its
+          # bin/ ships mariadb-dump + mariadb - the client tools FlexTable shells out
+          # to. MariaDB is its OWN namespace (not `mysql`): the app downloads/resolves
+          # MariaDB tools under `tools/mariadb-<major>/`, keyed by connection type.
+          echo "::group::mariadb (${{ matrix.platform_key }})"
+          if ! brew install mariadb >/dev/null 2>&1; then
+            echo "no mariadb formula for ${{ matrix.platform_key }} - omitting"
+            echo "::endgroup::"; exit 0
+          fi
+          BIN="$(brew --prefix mariadb)/bin"
+          if [ ! -x "${BIN}/mariadb-dump" ]; then
+            echo "no mariadb-dump for mariadb (${{ matrix.platform_key }}) - omitting"
+            echo "::endgroup::"; exit 0
+          fi
+          MARIADB_MAJOR="$("${BIN}/mariadb-dump" --version | grep -oE 'Ver [0-9]+' | grep -oE '[0-9]+' | head -n1)"
+          if [ -z "$MARIADB_MAJOR" ]; then
+            echo "could not parse mariadb-dump major - omitting"
+            echo "::endgroup::"; exit 0
+          fi
+          BUNDLE_NAMESPACE=mariadb BUNDLE_TOOLS="mariadb-dump mariadb" \
+            ops/cli-tools/bundle_macos.sh "$BIN" "${MARIADB_MAJOR}" "${{ matrix.arch }}" dist
+          echo "::endgroup::"
+
       - name: Build Linux bundles
         if: startsWith(matrix.os, 'ubuntu') && contains(format(' {0} ', inputs.engines), ' postgresql ')
         env:
@@ -222,6 +252,45 @@ jobs:
           '
           if ! ls dist/mysql-*-linux-x86_64.zip >/dev/null 2>&1; then
             echo "no mysql linux bundle produced - omitted"
+          fi
+          echo "::endgroup::"
+
+      - name: Build Linux MariaDB bundle
+        if: startsWith(matrix.os, 'ubuntu') && contains(format(' {0} ', inputs.engines), ' mariadb ')
+        env:
+          MARIADB_SERIES: '11.4'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          echo "::group::mariadb ${MARIADB_SERIES} (linux-x86_64)"
+          # The official mariadb image is Ubuntu-based (has apt + patchelf-installable)
+          # and ships the client tools in /usr/bin, so - unlike the Oracle-Linux-slim
+          # mysql image - we bundle INSIDE it (the pg in-container pattern) rather than
+          # docker-cp'ing out. 11.4 is the current LTS -> integer major 11.
+          if ! docker pull "mariadb:${MARIADB_SERIES}" >/dev/null 2>&1; then
+            echo "no mariadb:${MARIADB_SERIES} image - omitting"
+            echo "::endgroup::"; exit 0
+          fi
+          docker run --rm -v "$PWD:/work" -w /work "mariadb:${MARIADB_SERIES}" bash -c '
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq patchelf zip python3 >/dev/null
+            if [ ! -x /usr/bin/mariadb-dump ] || [ ! -x /usr/bin/mariadb ]; then
+              echo "mariadb-dump/mariadb not found in image - omitting"; exit 0
+            fi
+            MARIADB_MAJOR="$(/usr/bin/mariadb-dump --version | grep -oE "Ver [0-9]+" | grep -oE "[0-9]+" | head -n1)"
+            if [ -z "${MARIADB_MAJOR}" ]; then
+              echo "could not parse the mariadb client major - omitting"; exit 0
+            fi
+            echo "mariadb client major: ${MARIADB_MAJOR}"
+            rm -rf /tmp/mariadbbin && mkdir -p /tmp/mariadbbin
+            cp -f /usr/bin/mariadb-dump /usr/bin/mariadb /tmp/mariadbbin/
+            BUNDLE_NAMESPACE=mariadb BUNDLE_TOOLS="mariadb-dump mariadb" \
+              ops/cli-tools/bundle_linux.sh /tmp/mariadbbin "${MARIADB_MAJOR}" x86_64 dist
+          '
+          if ! ls dist/mariadb-*-linux-x86_64.zip >/dev/null 2>&1; then
+            echo "no mariadb linux bundle produced - omitted"
           fi
           echo "::endgroup::"
 
@@ -311,6 +380,55 @@ jobs:
           ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -OutDir dist
           Write-Host "::endgroup::"
           # neutralize any non-zero $LASTEXITCODE leaked by dumpbin/curl so the step passes.
+          exit 0
+
+      - name: Build Windows MariaDB bundle
+        if: startsWith(matrix.os, 'windows') && contains(format(' {0} ', inputs.engines), ' mariadb ')
+        shell: pwsh
+        env:
+          # 11.4 LTS -> integer major 11, MariaDB's own namespace.
+          MARIADB_SERIES: '11.4'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $series = $env:MARIADB_SERIES      # 11.4
+          $major = $series.Split('.')[0]     # 11 - integer manifest key
+          Write-Host "::group::mariadb $series (windows-x86_64)"
+          # archive.mariadb.org has predictable, stable winx64 zip paths. Probe the
+          # newest patch first with curl.exe (curl -L follows the redirect that
+          # Invoke-WebRequest chokes on), then download the first that exists.
+          $zipPath = "$env:RUNNER_TEMP\mariadb$major.zip"
+          $found = $null
+          foreach ($patch in 12..0) {
+            $ver = "$series.$patch"
+            $cand = "https://archive.mariadb.org/mariadb-$ver/winx64-packages/mariadb-$ver-winx64.zip"
+            curl.exe -sIL --fail -o NUL $cand 2>$null
+            if ($LASTEXITCODE -eq 0) { $found = $cand; break }
+          }
+          if (-not $found) {
+            Write-Host "no MariaDB winx64 zip for $series - omitting"
+            Write-Host "::endgroup::"; exit 0
+          }
+          Write-Host "resolved $found"
+          curl.exe -sL --fail -o $zipPath $found
+          if (-not (Test-Path $zipPath) -or (Get-Item $zipPath).Length -lt 1000000) {
+            Write-Host "download failed for $found - omitting"
+            Write-Host "::endgroup::"; exit 0
+          }
+          $extract = "$env:RUNNER_TEMP\mariadb$major"
+          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          # tar.exe (bsdtar, present on every Windows runner) is far more reliable than
+          # Expand-Archive on MariaDB's large full zip.
+          tar.exe -xf $zipPath -C $extract
+          $bin = Get-ChildItem -Path $extract -Directory | Select-Object -First 1 | ForEach-Object { Join-Path $_.FullName 'bin' }
+          $dump = if ($bin) { Join-Path $bin 'mariadb-dump.exe' } else { $null }
+          if (-not $dump -or -not (Test-Path $dump) -or (Get-Item $dump).Length -lt 100000) {
+            Write-Host "mariadb-dump.exe missing/empty for mariadb $series - omitting"
+            Write-Host "::endgroup::"; exit 0
+          }
+          Write-Host "mariadb-dump.exe: $((Get-Item $dump).Length) bytes"
+          ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mariadb -OutDir dist
+          Write-Host "::endgroup::"
           exit 0
 
       - name: Upload bundles

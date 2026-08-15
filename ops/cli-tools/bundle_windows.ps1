@@ -48,26 +48,16 @@ $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = $env:BUNDLE_NAMESPACE }
 if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = 'postgresql' }
 
-# Tool names as an ARRAY per namespace. Deliberately NOT a space-separated string: under
-# the Actions pwsh host a space-containing value assigned to a variable came back empty
-# (observed via -Tools, BUNDLE_TOOLS, and even a literal), while -Namespace (no space) and
-# array literals are unaffected.
-$toolNames = switch ($Namespace) {
-  'mysql'   { @('mysqldump', 'mysql') }
-  'mariadb' { @('mariadb-dump', 'mariadb') }
-  'mongodb' { @('mongodump', 'mongorestore') }
-  default   { @('pg_dump', 'pg_restore', 'psql') }
+# The tool set (with .exe) as a namespace-keyed ARRAY LITERAL. Built directly - NOT via a
+# space-separated string nor a `$tools += ...` accumulation loop, both of which the Actions
+# pwsh host mangled here (a spaced value came back empty; the += loop concatenated the two
+# names into one element 'mysqldump.exemysql.exe'). Add a namespace case for a new engine.
+$tools = switch ($Namespace) {
+  'mysql'   { @('mysqldump.exe', 'mysql.exe') }
+  'mariadb' { @('mariadb-dump.exe', 'mariadb.exe') }
+  'mongodb' { @('mongodump.exe', 'mongorestore.exe') }
+  default   { @('pg_dump.exe', 'pg_restore.exe', 'psql.exe') }
 }
-# An explicit -Tools / BUNDLE_TOOLS list still overrides if it survived binding.
-if (-not [string]::IsNullOrWhiteSpace($Tools)) { $toolNames = $Tools -split '[\s,]+' | Where-Object { $_ -ne '' } }
-elseif (-not [string]::IsNullOrWhiteSpace($env:BUNDLE_TOOLS)) { $toolNames = $env:BUNDLE_TOOLS -split '[\s,]+' | Where-Object { $_ -ne '' } }
-
-# Append the .exe suffix Windows needs (unless the caller already included it).
-$tools = @()
-foreach ($t in $toolNames) {
-  if ($t.ToLower().EndsWith('.exe')) { $tools += $t } else { $tools += "$t.exe" }
-}
-Write-Host "DEBUG ns='$Namespace' tools=[$($tools -join '|')]"
 if ($tools.Count -eq 0) { throw "no tools to bundle (namespace='$Namespace')" }
 $name = "$Namespace-$Major-windows-$Arch"
 $stage = Join-Path $OutDir $name
@@ -108,11 +98,10 @@ foreach ($f in Get-ChildItem -Path $SrcBinDir -File) {
   $srcByName[$f.Name.ToLower()] = $f.FullName
 }
 
-Write-Host "==> staging $name (tool count: $($tools.Count))"
+Write-Host "==> staging $name ($($tools.Count) tools)"
 foreach ($t in $tools) {
-  Write-Host "DEBUG-tool len=$($t.Length) val=<$t>"
   $src = Join-Path $SrcBinDir $t
-  if (-not (Test-Path -LiteralPath $src)) { throw "missing executable src=<$src>" }
+  if (-not (Test-Path -LiteralPath $src)) { throw "missing executable: $src" }
   Copy-Item -Force -LiteralPath $src -Destination (Join-Path $stage $t)
 }
 

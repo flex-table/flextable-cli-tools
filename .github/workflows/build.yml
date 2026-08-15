@@ -307,15 +307,8 @@ jobs:
             Write-Host "::endgroup::"; exit 0
           }
           Write-Host "mysqldump.exe: $((Get-Item $dump).Length) bytes"
-          # The Windows MySQL bundle is currently blocked by a pwsh-host quirk on the runner
-          # where 2-element array literals collapse to one concatenated element (#497). Omit
-          # gracefully so the macOS + Linux MySQL bundles still build + publish.
-          try {
-            ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -OutDir dist
-          } catch {
-            Write-Host "windows mysql bundle failed (known #497 pwsh-array issue) - omitting: $_"
-            Get-ChildItem "dist\mysql-*-windows-x86_64.zip" -ErrorAction SilentlyContinue | Remove-Item -Force
-          }
+          # Only pass -Namespace (binds reliably); the script derives the tool set from it.
+          ops/cli-tools/bundle_windows.ps1 -SrcBinDir $bin -Major $major -Namespace mysql -OutDir dist
           Write-Host "::endgroup::"
           # neutralize any non-zero $LASTEXITCODE leaked by dumpbin/curl so the step passes.
           exit 0
